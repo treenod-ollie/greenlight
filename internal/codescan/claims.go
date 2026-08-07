@@ -30,7 +30,7 @@ type Claims struct {
 // deliberately: the runtime tier re-checks exactly the flows static can only guess.
 var (
 	reAccountCreation = regexp.MustCompile(`(?i)(createAccount|signUp|register.*user\b|create.*account|auth\(\)\.createUser)`)
-	reIAP             = regexp.MustCompile(`(?i)(SKPaymentQueue|StoreKit|Product\.purchase|purchaseProduct|expo-in-app-purchases|react-native-iap|RevenueCat|UnityEngine\.Purchasing|UnityPurchasing\.|IStoreListener|IDetailedStoreListener|CodelessIAPStoreListener)`)
+	reIAP             = regexp.MustCompile(`(?i)(SKPaymentQueue|StoreKit|Product\.purchase|purchaseProduct|expo-in-app-purchases|react-native-iap|RevenueCat|UnityEngine\.Purchasing|UnityPurchasing\.|IStoreListener|IDetailedStoreListener|CodelessIAPStoreListener|TGP\.Billing)`)
 	reSocialLogin     = regexp.MustCompile(`(?i)(google.*sign.*in|GIDSignIn|GoogleSignin|facebook.*login|FBSDKLoginManager|LoginManager\.logIn)`)
 
 	reDeleteAccount = regexp.MustCompile(`(?i)(deleteAccount|delete.*account|remove.*account|account.*delet|close.*account|closeAccount|cancel.*account|delete.*my.*account|erase.*account)`)

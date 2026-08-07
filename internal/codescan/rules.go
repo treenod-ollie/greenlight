@@ -142,6 +142,12 @@ func AllRules() []Rule {
 				// Unity IAP: UnityEngine.Purchasing namespace, its store listener
 				// interfaces, and the codeless IAP path.
 				regexp.MustCompile(`(?i)(UnityEngine\.Purchasing|UnityPurchasing\.|IStoreListener|IDetailedStoreListener|CodelessIAPStoreListener)`),
+				// TGPlatform billing (in-house SDK). Its purchase call already matches
+				// the generic purchaseProduct pattern above, but only by coincidence of
+				// naming — anchoring on the namespace keeps 3.1.1 evaluable if the SDK
+				// ever renames its methods, and catches a storefront that queries or
+				// initialises billing in a file that never names a purchase.
+				regexp.MustCompile(`TGP\.Billing`),
 			},
 			antiPatterns: []*regexp.Regexp{
 				// RestoreTransactions is Unity IAP's restore call. Matching the
