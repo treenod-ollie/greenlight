@@ -178,12 +178,8 @@ func printIPAFooter(criticals, warns, infos int, elapsed time.Duration) {
 
 	fmt.Println()
 	dim.Fprintln(os.Stdout, "  ─────────────────────────────────────────────")
-	fmt.Fprint(os.Stdout, "  Built by ")
-	purple.Fprint(os.Stdout, "Revyl")
-	fmt.Fprintln(os.Stdout, " — the mobile reliability platform")
-	dim.Fprintln(os.Stdout, "  Catch more than rejections. Catch bugs.")
-	fmt.Fprint(os.Stdout, "  ")
-	color.New(color.Underline).Fprintln(os.Stdout, "https://revyl.com")
+	dim.Fprintln(os.Stdout, "  Offline-only build — nothing left this machine.")
+	dim.Fprintln(os.Stdout, "  Based on greenlight by Revyl (MIT).")
 	fmt.Println()
 
 	return

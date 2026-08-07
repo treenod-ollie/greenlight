@@ -11,7 +11,6 @@ import (
 
 	"github.com/RevylAI/greenlight/internal/preflight"
 	"github.com/RevylAI/greenlight/internal/sarif"
-	"github.com/RevylAI/greenlight/internal/verify"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -23,22 +22,13 @@ var (
 	preflightFormat   string
 	preflightOutput   string
 	preflightExitCode bool
-
-	// Runtime tier (--verify): after the static checks, hand flow-dependent
-	// guidelines to Revyl to validate on a cloud device.
-	preflightVerify      bool
-	preflightBuildName   string
-	preflightArtifact    string
-	preflightVarsRaw     []string
-	preflightDeviceModel string
-	preflightOSVersion   string
 )
 
 var preflightCmd = &cobra.Command{
 	Use:   "preflight [path]",
-	Short: "Run ALL checks on your project — one command, zero uploads",
-	Long: `Run every greenlight check in a single command. No App Store Connect
-account needed — everything runs locally on your source code and optional IPA.
+	Short: "Run ALL checks on your project — one command, fully offline",
+	Long: `Run every greenlight check in a single command. Everything runs locally on
+your source code and optional build artifact; nothing is uploaded anywhere.
 
 Combines:
   • Code scan     — private APIs, hardcoded secrets, missing ATT, etc.
@@ -51,15 +41,14 @@ Android projects are detected automatically, including the android/ directory
 of an Expo or React Native app, so a cross-platform repo is checked against
 both stores in one pass.
 
-Add --verify to continue past the static checks and validate your flow-dependent
-guidelines (account deletion, restore purchases, Sign in with Apple) on a REAL
-device via Revyl — catching broken flows static analysis structurally can't.
+Note that static analysis can only confirm a flow EXISTS in source, never that
+it works. Account deletion, restore purchases and Sign in with Apple still need
+a human to exercise them on a device before submission.
 
 Usage:
   greenlight preflight .
   greenlight preflight ./my-app --ipa build.ipa
-  greenlight preflight /path/to/project --format json
-  greenlight preflight . --verify --build-name "My App" --var email=qa@acme.com --var password=secret`,
+  greenlight preflight /path/to/project --format json`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runPreflight,
 }
@@ -70,13 +59,7 @@ func init() {
 	preflightCmd.Flags().StringVar(&preflightAAB, "aab", "", "path to a built .aab — adds the merged-manifest and native code checks")
 	preflightCmd.Flags().StringVar(&preflightFormat, "format", "terminal", "output format: terminal, json, sarif")
 	preflightCmd.Flags().StringVar(&preflightOutput, "output", "", "write report to file (stdout if omitted)")
-	preflightCmd.Flags().BoolVar(&preflightExitCode, "exit-code", false, "exit non-zero on any CRITICAL or HIGH finding (or, with --verify, a failed flow) — for CI gating")
-	preflightCmd.Flags().BoolVar(&preflightVerify, "verify", false, "after static checks, validate flow-dependent guidelines on a cloud device via Revyl")
-	preflightCmd.Flags().StringVar(&preflightBuildName, "build-name", "", "Revyl build/app name (for --verify)")
-	preflightCmd.Flags().StringVar(&preflightArtifact, "artifact", "", "upload a prebuilt .app (iOS sim) or .apk (Android) to Revyl before --verify runs")
-	preflightCmd.Flags().StringArrayVar(&preflightVarsRaw, "var", nil, "test variable for --verify, e.g. --var email=qa@acme.com (repeatable)")
-	preflightCmd.Flags().StringVar(&preflightDeviceModel, "device-model", "", "device model for --verify, e.g. \"iPhone 16\"")
-	preflightCmd.Flags().StringVar(&preflightOSVersion, "os-version", "", "OS version for --verify, e.g. \"iOS 26.2\"")
+	preflightCmd.Flags().BoolVar(&preflightExitCode, "exit-code", false, "exit non-zero on any CRITICAL or HIGH finding — for CI gating")
 	rootCmd.AddCommand(preflightCmd)
 }
 
@@ -166,97 +149,34 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	isJSON := format == "json"
 	isSARIF := format == "sarif"
 
-	// SARIF represents static code findings; runtime flow results aren't code
-	// locations. Reject the combination up front so we don't run (and bill) a
-	// device flow whose result the SARIF output would silently drop.
-	if isSARIF && preflightVerify {
-		return fmt.Errorf("--format sarif carries static findings only and can't represent --verify runtime results; use --format json for combined output, or run 'greenlight verify' separately")
-	}
-
-	// Default path: static only — offline, zero-account, instant, and complete
-	// on its own. The runtime tier is strictly opt-in; we only leave a light tip.
-	if !preflightVerify {
-		switch {
-		case isJSON:
-			if err := writePreflightJSON(output, result); err != nil {
-				return err
-			}
-		case isSARIF:
-			if err := writePreflightSARIF(output, result); err != nil {
-				return err
-			}
-		default:
-			if err := writePreflightTerminal(output, result); err != nil {
-				return err
-			}
-			dim.Fprintln(output, "  Tip → 'greenlight preflight --verify' also runs your sign-in, purchase, and")
-			dim.Fprintln(output, "        account-deletion flows on a Revyl cloud device to confirm they work.")
-			fmt.Fprintln(output)
+	switch {
+	case isJSON:
+		if err := writePreflightJSON(output, result); err != nil {
+			return err
 		}
-		return preflightExit(result, nil)
-	}
-
-	// --verify: the static cycle runs, THEN Revyl runs the flows on a device.
-	//
-	// The platform follows the project rather than being fixed to iOS. An
-	// Android-only project verified as iOS would have its artifact rejected and
-	// its flows run against the wrong store's expectations.
-	verifyPlatform := verifyPlatformFor(path, preflightArtifact)
-	if preflightArtifact != "" {
-		if preflightBuildName == "" {
-			return fmt.Errorf("--artifact requires --build-name (to name or match the Revyl app for the uploaded build)")
+	case isSARIF:
+		if err := writePreflightSARIF(output, result); err != nil {
+			return err
 		}
-		if err := verify.ValidateArtifact(preflightArtifact, verifyPlatform); err != nil {
+	default:
+		if err := writePreflightTerminal(output, result); err != nil {
 			return err
 		}
 	}
-	vstart := time.Now()
-	vres, verr := verify.Run(verify.Config{
-		ProjectPath: path,
-		BuildName:   preflightBuildName,
-		Platform:    verifyPlatform,
-		Vars:        parseVars(preflightVarsRaw),
-		DeviceModel: preflightDeviceModel,
-		OSVersion:   preflightOSVersion,
-		Artifact:    preflightArtifact,
-	})
-	if verr != nil {
-		return fmt.Errorf("runtime validation failed: %w", verr)
-	}
-	vres.Elapsed = time.Since(vstart)
-
-	if isJSON {
-		if err := writeCombinedJSON(output, result, vres); err != nil {
-			return err
-		}
-		return preflightExit(result, vres)
-	}
-
-	if err := writePreflightTerminal(output, result); err != nil {
-		return err
-	}
-	fmt.Fprintln(output)
-	purple.Fprintln(output, "  → Static checks done. Now validating the flows actually WORK, on a cloud device…")
-	fmt.Fprintln(output)
-	writeVerifyTerminal(output, vres)
-	return preflightExit(result, vres)
+	return preflightExit(result)
 }
 
 // preflightExit maps findings to a non-zero process exit when --exit-code is
-// set: any CRITICAL or HIGH static finding, or (when --verify ran) a failed or
-// errored runtime flow. It returns ErrThreshold, which main() turns into exit 1
-// without printing — the report itself is the user-facing output.
-func preflightExit(result *preflight.Result, vres *verify.Result) error {
+// set: any CRITICAL or HIGH finding, or an incomplete scan. It returns
+// ErrThreshold, which main() turns into exit 1 without printing — the report
+// itself is the user-facing output.
+func preflightExit(result *preflight.Result) error {
 	if !preflightExitCode {
 		return nil
 	}
-	// Critical/High findings, an incomplete scan (a requested scanner crashed),
-	// or a failed runtime flow all fail the gate.
-	fail := result.Summary.Critical > 0 || result.Summary.High > 0 || result.Incomplete
-	if vres != nil && !vres.Summary.Passed {
-		fail = true
-	}
-	if fail {
+	// Critical/High findings, or an incomplete scan (a requested scanner
+	// crashed), fail the gate.
+	if result.Summary.Critical > 0 || result.Summary.High > 0 || result.Incomplete {
 		return ErrThreshold
 	}
 	return nil
@@ -487,12 +407,8 @@ func printPreflightFooter(w *os.File, result *preflight.Result) {
 	// Revyl attribution
 	fmt.Fprintln(w)
 	dim.Fprintln(w, "  ─────────────────────────────────────────────")
-	fmt.Fprintf(w, "  Built by ")
-	purple.Fprint(w, "Revyl")
-	fmt.Fprintln(w, " — the mobile reliability platform")
-	dim.Fprintln(w, "  Catch more than rejections. Catch bugs.")
-	fmt.Fprint(w, "  ")
-	color.New(color.Underline).Fprintln(w, "https://revyl.com")
+	dim.Fprintln(w, "  Offline-only build — nothing left this machine.")
+	dim.Fprintln(w, "  Based on greenlight by Revyl (MIT).")
 	fmt.Fprintln(w)
 }
 
@@ -549,26 +465,6 @@ func writePreflightSARIF(w *os.File, result *preflight.Result) error {
 	return sarif.Write(w, "greenlight", appVersion, greenlightInfoURI, sf)
 }
 
-// writeCombinedJSON emits the static result and the runtime (Revyl) result
-// together under one object — used when --verify is chained with --format json.
-func writeCombinedJSON(w *os.File, result *preflight.Result, vres *verify.Result) error {
-	combined := struct {
-		Static  interface{} `json:"static"`
-		Runtime interface{} `json:"runtime"`
-	}{
-		Static:  preflightJSONObject(result),
-		Runtime: verifyJSONObject(vres),
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(combined)
-}
-
-// verifyPlatformFor picks the platform the runtime tier should target. An
-// explicit artifact extension is authoritative, since the file itself says what
-// it is; otherwise the project layout decides, defaulting to iOS for a
-// cross-platform or unrecognised project because the App Store flows are the
-// ones greenlight models most completely.
 func verifyPlatformFor(projectPath, artifact string) string {
 	switch strings.ToLower(filepath.Ext(artifact)) {
 	case ".apk":

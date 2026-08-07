@@ -306,12 +306,8 @@ func printCodescanFooter(w *os.File, criticals, highs, warns, infos int, elapsed
 	// Revyl attribution
 	fmt.Fprintln(w)
 	dim.Fprintln(w, "  ─────────────────────────────────────────────")
-	fmt.Fprintf(w, "  Built by ")
-	purple.Fprint(w, "Revyl")
-	fmt.Fprintln(w, " — the mobile reliability platform")
-	dim.Fprintln(w, "  Catch more than rejections. Catch bugs.")
-	fmt.Fprint(w, "  ")
-	color.New(color.Underline).Fprintln(w, "https://revyl.com")
+	dim.Fprintln(w, "  Offline-only build — nothing left this machine.")
+	dim.Fprintln(w, "  Based on greenlight by Revyl (MIT).")
 	fmt.Fprintln(w)
 }
 

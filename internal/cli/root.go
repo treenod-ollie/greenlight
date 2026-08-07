@@ -30,11 +30,14 @@ Greenlight scans your app against Apple's App Store Review Guidelines and
 Google Play's Developer Program Policies before you submit, catching
 rejection risks so you ship with confidence.
 
+This is an OFFLINE-ONLY build: every command reads local files and nothing
+else. There is no network code left in the binary — no account, no upload,
+no telemetry. Source and build artifacts never leave the machine.
+
 Get started:
-  greenlight preflight .          Run ALL checks — one command, zero uploads
+  greenlight preflight .          Run ALL checks — one command, fully offline
   greenlight preflight . --ipa X  Include IPA binary analysis
   greenlight playscan .           Google Play policies + target API deadline
-  greenlight scan --app-id ID     Check App Store Connect metadata (needs API key)
   greenlight guidelines search    Browse Apple's review guidelines`,
 		purple.Sprint("greenlight — know before you submit.")),
 }
@@ -59,8 +62,6 @@ func init() {
 	// Match the `version` subcommand's wording ("greenlight <v>") for `--version`.
 	rootCmd.SetVersionTemplate("greenlight {{.Version}}\n")
 
-	rootCmd.AddCommand(scanCmd)
-	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(guidelinesCmd)
 	rootCmd.AddCommand(versionCmd)
 }
