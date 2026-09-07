@@ -121,6 +121,8 @@ var trackingSDKPatterns = []struct {
 	{regexp.MustCompile(`(?i)(ironSource|IronSource)`), "ironSource"},
 }
 
+var reATTImplemented = regexp.MustCompile(`(?i)(ATTrackingManager|requestTrackingAuthorization|AppTrackingTransparency|expo-tracking-transparency|ATTrackingStatusBinding)`)
+
 // Scan runs the privacy analysis on a project directory.
 func Scan(projectPath string) (*ScanResult, error) {
 	result := &ScanResult{
@@ -177,9 +179,11 @@ func Scan(projectPath string) (*ScanResult, error) {
 		fullContent := strings.Join(lines, "\n")
 
 		// Check for ATT implementation. ATTrackingStatusBinding is Unity's ATT
-		// binding; NSUserTrackingUsageDescription in source means a build
-		// post-processor injects the ATT purpose string into Info.plist.
-		if regexp.MustCompile(`(?i)(ATTrackingManager|requestTrackingAuthorization|AppTrackingTransparency|expo-tracking-transparency|ATTrackingStatusBinding|NSUserTrackingUsageDescription)`).MatchString(fullContent) {
+		// binding. NSUserTrackingUsageDescription is not accepted as evidence: the
+		// key is the purpose string, not the prompt, and declaring it without ever
+		// calling requestTrackingAuthorization is itself the most common ATT
+		// rejection — so reading it as "ATT is handled" hides the failure.
+		if reATTImplemented.MatchString(fullContent) {
 			hasATT = true
 		}
 
@@ -308,15 +312,25 @@ func formatHits(hits []FileHit) string {
 	return s
 }
 
+// findPrivacyManifest locates the app's own PrivacyInfo.xcprivacy.
+//
+// Dependency manifests must be skipped, not merely deprioritized. Unity packages
+// ship their own .xcprivacy under Library/PackageCache, and the first one the
+// walk happens to reach would otherwise be read as the app's — flipping
+// HasPrivacyInfo to true and taking its declared APIs as the app's declarations.
+// That hides both privacy CRITICALs (missing manifest, undeclared required-reason
+// API) in precisely the Unity projects the C#/Unity support exists to scan.
 func findPrivacyManifest(root string) (string, string) {
 	var found string
 	var content string
+
+	unitySkip := codescan.UnityGeneratedDirs(root)
 
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			if info != nil && info.IsDir() {
 				name := info.Name()
-				if name == "node_modules" || name == ".git" || name == "Pods" || name == "build" || name == "DerivedData" {
+				if name == "node_modules" || name == ".git" || name == "Pods" || name == "build" || name == "DerivedData" || unitySkip[path] {
 					return filepath.SkipDir
 				}
 			}

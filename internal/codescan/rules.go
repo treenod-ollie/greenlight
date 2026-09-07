@@ -101,9 +101,15 @@ func AllRules() []Rule {
 			},
 			antiPatterns: []*regexp.Regexp{
 				// ATTrackingStatusBinding is Unity's iOS-14 advertising-support ATT
-				// binding; NSUserTrackingUsageDescription in source means a build
-				// post-processor injects the ATT purpose string into Info.plist.
-				regexp.MustCompile(`(?i)(ATTrackingManager|requestTrackingAuthorization|AppTrackingTransparency|expo-tracking-transparency|ATTrackingStatusBinding|NSUserTrackingUsageDescription)`),
+				// binding — calling it is the prompt.
+				//
+				// NSUserTrackingUsageDescription is deliberately NOT here. The key only
+				// proves a purpose string exists; it says nothing about whether
+				// requestTrackingAuthorization is ever called. Shipping the string
+				// without ever prompting is the single most common ATT rejection, so
+				// treating the key as proof silences 5.1.2 on exactly the apps that
+				// fail it.
+				regexp.MustCompile(`(?i)(ATTrackingManager|requestTrackingAuthorization|AppTrackingTransparency|expo-tracking-transparency|ATTrackingStatusBinding)`),
 			},
 			antiPatternsGlobal: true,
 			firstMatchOnly:     true,
@@ -124,7 +130,22 @@ func AllRules() []Rule {
 				// APPLE_SIGNIN_RESULT_*, never naming ASAuthorization* directly.
 				// The trailing [^gG] keeps "apple ... signing" (code signing, which
 				// appears in every iOS build script) from passing as sign-IN.
-				regexp.MustCompile(`(?i)(ASAuthorizationAppleIDProvider|SignInWithApple|apple.*auth|appleAuth|expo-apple-authentication|apple[_\s-]*sign[_\s-]?in([^gG]|$)|sign[_\s-]?in[_\s-]?with[_\s-]?apple)`),
+				//
+				// `apple.*auth` used to be here. `.*` spans the whole line, so any line
+				// mentioning Apple that also contains "auth" anywhere — a docs URL, an
+				// unrelated authToken next to an appleId — disabled 4.8 for the whole
+				// project. Bounded to one identifier's worth of characters.
+				regexp.MustCompile(`(?i)(ASAuthorizationAppleIDProvider|SignInWithApple|apple[a-z0-9_.-]*auth|appleAuth|expo-apple-authentication|apple[_\s-]*sign[_\s-]?in([^gG]|$)|sign[_\s-]?in[_\s-]?with[_\s-]?apple)`),
+			},
+			antiIgnorePatterns: []*regexp.Regexp{
+				// "Sign in with Apple coming soon!" is the opposite of evidence, and so
+				// is `appleSignIn: false`. Both used to satisfy the anti-pattern and
+				// turn a HIGH 4.8 into silence.
+				// Word-anchored: an unanchored `WIP` also matches "swipe".
+				regexp.MustCompile(`(?i)(coming soon|not (yet )?(supported|implemented|available|enabled)|\b(unsupported|unimplemented|planned|roadmap|TODO|FIXME|WIP)\b|no(t)? longer)`),
+				regexp.MustCompile(`(?i)apple[a-z0-9_.-]*sign[_\s-]?in[a-z0-9_]*\s*[:=]+\s*(false|0|null|nil|no|off|disabled)\b`),
+				// A documentation link is a reference, not an implementation.
+				regexp.MustCompile(`(?i)https?://[^\s"'` + "`" + `]*apple`),
 			},
 			antiPatternsGlobal: true,
 			firstMatchOnly:     true,
@@ -168,12 +189,16 @@ func AllRules() []Rule {
 			fix:       "Add an account deletion option in settings. Must actually delete data, not just deactivate.",
 			languages: []string{"swift", "objc", "typescript", "javascript", "csharp"},
 			patterns: []*regexp.Regexp{
-				// `user` needs a trailing word boundary: without it, `register.*user`
-				// matched registerDefaults:@{@"UserAgent"...} and flagged every app
-				// that customizes a webview user agent as having account signup.
-				// (registerUser( still matches — `(` is a boundary; UserAgent's
-				// `user` is followed by a letter and no longer does.)
-				regexp.MustCompile(`(?i)(createAccount|signUp|register.*user\b|create.*account|auth\(\)\.createUser)`),
+				// `register[A-Za-z_]*user` keeps registerDefaults:@{@"UserAgent"...} —
+				// UIKit's user-agent override, which used to flag every app with a
+				// customized webview as having signup — out, because the gap holds
+				// punctuation, not identifier characters.
+				//
+				// A trailing \b was the earlier fix and cut too deep: it drops every
+				// camelCase signup identifier, since `user` is followed by a word
+				// character in RegisterUserAsync, registerUserWithEmail and most of the
+				// C# shapes this scanner was extended to read.
+				regexp.MustCompile(`(?i)(createAccount|signUp|register[a-z_]*user|create.*account|auth\(\)\.createUser)`),
 			},
 			antiPatterns: []*regexp.Regexp{
 				regexp.MustCompile(`(?i)(deleteAccount|delete.*account|remove.*account|account.*delet|close.*account|closeAccount|cancel.*account|delete.*my.*account|erase.*account)`),
@@ -357,6 +382,7 @@ type PatternRule struct {
 	languages          []string
 	patterns           []*regexp.Regexp
 	antiPatterns       []*regexp.Regexp // If found anywhere in project, suppress this rule
+	antiIgnorePatterns []*regexp.Regexp // Lines matching these can never serve as anti-pattern evidence
 	antiPatternsGlobal bool             // Check anti-patterns across all files, not just current
 	ignorePatterns     []*regexp.Regexp // Lines matching these are skipped
 	countThreshold     int              // Only report if count exceeds this
@@ -386,11 +412,29 @@ func (r *PatternRule) AntiPatternMatched(fc FileContext) bool {
 	//
 	// String literals stay: SDK-driven implementations name their providers in
 	// strings (e.g. an "APPLE_SIGNIN_RESULT_CANCELED" error-code constant).
+	//
+	// antiIgnorePatterns then drop lines that mention the feature in order to deny
+	// it — "coming soon", `appleSignIn: false`, a docs URL. Dropping a line that
+	// might have been real evidence costs at most one false positive; accepting a
+	// denial as proof silences the rule everywhere, which is the expensive
+	// direction for a submission gate.
 	for _, code := range stripCommentsMultiline(fc.Lines) {
+		if matchesAny(r.antiIgnorePatterns, code) {
+			continue
+		}
 		for _, ap := range r.antiPatterns {
 			if ap.MatchString(code) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func matchesAny(patterns []*regexp.Regexp, s string) bool {
+	for _, p := range patterns {
+		if p.MatchString(s) {
+			return true
 		}
 	}
 	return false
@@ -479,10 +523,86 @@ func (r *PatternRule) Check(fc FileContext) []Finding {
 	return findings
 }
 
-// stripStringsAndComments blanks out the contents of "..."/'...' string literals
-// and removes // line comments and /* */ block comments, so codeOnly rules match
-// only real code. It's a lightweight scan (no escaped-quote handling), which is
-// enough to keep call-shaped text like "UIWebView()" out of the match.
+// stripLine walks one line of C-family source, blanking comments and — when
+// blankStrings is set — string literal contents too. inBlock carries /* … */
+// state in and out so a caller can run it across a whole file.
+//
+// Escapes must be tracked, not skipped over: a `\"` inside a literal ends the
+// string early for a naive scanner, which then reads the rest of the line as
+// being *inside* a string and leaves a trailing `// …` comment intact. That
+// comment can then satisfy an anti-pattern and switch a rule off project-wide —
+// `string s = "quote: \" end"; // TODO: implement Sign in with Apple` did
+// exactly that to Guideline 4.8. `char q = '\'';` is the same bug.
+//
+// C# verbatim strings (@"C:\path") are the mirror case: there `\` is an ordinary
+// character and `""` is the escaped quote, so applying C escape rules would run
+// the string state off the end of the line.
+func stripLine(line string, blankStrings bool, inBlock *bool) string {
+	var b strings.Builder
+	b.Grow(len(line))
+
+	put := func(c byte, inStr bool) {
+		if inStr && blankStrings {
+			b.WriteByte(' ')
+			return
+		}
+		b.WriteByte(c)
+	}
+
+	inStr, verbatim := false, false
+	var quote byte
+
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case *inBlock:
+			if c == '*' && i+1 < len(line) && line[i+1] == '/' {
+				*inBlock = false
+				i++
+			}
+			b.WriteByte(' ')
+		case inStr && verbatim:
+			// "" is an escaped quote; a lone " closes the literal.
+			if c == quote {
+				if i+1 < len(line) && line[i+1] == quote {
+					put(c, true)
+					put(line[i+1], true)
+					i++
+					continue
+				}
+				inStr, verbatim = false, false
+			}
+			put(c, inStr || c == quote)
+		case inStr:
+			if c == '\\' && i+1 < len(line) {
+				put(c, true)
+				put(line[i+1], true)
+				i++
+				continue
+			}
+			if c == quote {
+				inStr = false
+			}
+			put(c, inStr || c == quote)
+		case c == '"' || c == '\'' || c == '`':
+			inStr = true
+			quote = c
+			// @"…" (C#) and its interpolated form $@"…" are verbatim.
+			verbatim = c == '"' && i > 0 && line[i-1] == '@'
+			put(c, true)
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return b.String() // rest of the line is a comment
+		case c == '/' && i+1 < len(line) && line[i+1] == '*':
+			*inBlock = true
+			i++
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 // stripCommentsMultiline blanks comments across a file while preserving string
 // literals, carrying /* … */ state between lines so a block comment's
 // continuation lines are stripped too. It is string-aware, so a `//` inside a
@@ -490,80 +610,18 @@ func (r *PatternRule) Check(fc FileContext) []Finding {
 func stripCommentsMultiline(lines []string) []string {
 	out := make([]string, len(lines))
 	inBlock := false
-
 	for i, line := range lines {
-		var b strings.Builder
-		b.Grow(len(line))
-		inStr := false
-		var quote byte
-
-	scan:
-		for j := 0; j < len(line); j++ {
-			c := line[j]
-			switch {
-			case inBlock:
-				if c == '*' && j+1 < len(line) && line[j+1] == '/' {
-					inBlock = false
-					j++
-				}
-				b.WriteByte(' ')
-			case inStr:
-				b.WriteByte(c)
-				if c == quote {
-					inStr = false
-				}
-			case c == '"' || c == '\'' || c == '`':
-				inStr = true
-				quote = c
-				b.WriteByte(c)
-			case c == '/' && j+1 < len(line) && line[j+1] == '/':
-				break scan // rest of the line is a comment
-			case c == '/' && j+1 < len(line) && line[j+1] == '*':
-				inBlock = true
-				j++
-				b.WriteByte(' ')
-			default:
-				b.WriteByte(c)
-			}
-		}
-		out[i] = b.String()
+		out[i] = stripLine(line, false, &inBlock)
 	}
 	return out
 }
 
+// stripStringsAndComments blanks out the contents of "..."/'...' string literals
+// and removes // line comments and /* */ block comments, so codeOnly rules match
+// only real code — call-shaped text like "UIWebView()" stays out of the match.
 func stripStringsAndComments(line string) string {
-	var b strings.Builder
-	b.Grow(len(line))
-	inStr := false
-	var quote byte
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if inStr {
-			b.WriteByte(' ')
-			if c == quote {
-				inStr = false
-			}
-			continue
-		}
-		switch {
-		case c == '"' || c == '\'' || c == '`':
-			inStr = true
-			quote = c
-			b.WriteByte(' ')
-		case c == '/' && i+1 < len(line) && line[i+1] == '/':
-			return b.String() // rest of the line is a comment
-		case c == '/' && i+1 < len(line) && line[i+1] == '*':
-			end := strings.Index(line[i+2:], "*/")
-			if end < 0 {
-				return b.String() // unterminated block comment
-			}
-			i += end + 3 // skip past the closing */
-			b.WriteByte(' ')
-		default:
-			b.WriteByte(c)
-		}
-	}
-	return b.String()
+	inBlock := false
+	return stripLine(line, true, &inBlock)
 }
 
 // suppressedByIgnore reports whether the matching line, or the line directly
